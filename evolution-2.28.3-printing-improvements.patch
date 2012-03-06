@@ -1,0 +1,461 @@
+diff -up evolution-2.28.3/addressbook/gui/widgets/e-addressbook-view.c.printing-improvements evolution-2.28.3/addressbook/gui/widgets/e-addressbook-view.c
+--- evolution-2.28.3/addressbook/gui/widgets/e-addressbook-view.c.printing-improvements	2009-08-07 04:46:51.000000000 -0400
++++ evolution-2.28.3/addressbook/gui/widgets/e-addressbook-view.c	2010-06-24 22:15:28.076795055 -0400
+@@ -1597,11 +1597,12 @@ contact_print_button_draw_page (GtkPrint
+                                 EPrintable *printable)
+ {
+ 	GtkPageSetup *setup;
+-	gdouble top_margin;
++	gdouble top_margin, page_width;
+ 	cairo_t *cr;
+ 
+ 	setup = gtk_print_context_get_page_setup (context);
+ 	top_margin = gtk_page_setup_get_top_margin (setup, GTK_UNIT_POINTS);
++	page_width = gtk_page_setup_get_page_width (setup, GTK_UNIT_POINTS);
+ 
+ 	cr = gtk_print_context_get_cairo_context (context);
+ 
+@@ -1609,8 +1610,9 @@ contact_print_button_draw_page (GtkPrint
+ 
+ 	while (e_printable_data_left (printable)) {
+ 		cairo_save (cr);
++		contact_page_draw_footer(operation,context,page_nr++);
+ 		e_printable_print_page (
+-			printable, context, 6.5 * 72, top_margin + 10, TRUE);
++			printable, context, page_width - 16, top_margin + 10, TRUE);
+ 		cairo_restore (cr);
+ 	}
+ }
+diff -up evolution-2.28.3/addressbook/printing/e-contact-print.c.printing-improvements evolution-2.28.3/addressbook/printing/e-contact-print.c
+--- evolution-2.28.3/addressbook/printing/e-contact-print.c.printing-improvements	2009-07-13 03:45:12.000000000 -0400
++++ evolution-2.28.3/addressbook/printing/e-contact-print.c	2010-06-24 22:15:28.079023586 -0400
+@@ -121,6 +121,7 @@ e_contact_output (GtkPrintContext *conte
+ 	pango_layout_set_text (layout, text, -1);
+ 	pango_layout_set_width (layout, pango_units_from_double (width));
+ 	pango_layout_set_indent (layout, pango_units_from_double (indent));
++	pango_layout_set_wrap (layout, PANGO_WRAP_WORD_CHAR);
+ 
+ 	cr = gtk_print_context_get_cairo_context (context);
+ 
+@@ -223,12 +224,78 @@ e_contact_start_new_page (EContactPrintC
+ }
+ 
+ static void
++e_contact_start_new_column (EContactPrintContext *ctxt)
++{
++	if (++ctxt->column >= ctxt->style->num_columns)
++		e_contact_start_new_page (ctxt);
++	else {
++		ctxt->x = ctxt->column *
++			(ctxt->column_width + ctxt->column_spacing);
++		ctxt->y = .0;
++	}
++}
++
++static gdouble
++e_contact_get_contact_height (EContact *contact, EContactPrintContext *ctxt)
++{
++	GtkPageSetup *setup;
++	gchar *file_as;
++	gdouble page_height;
++	gint field;
++	gdouble cntct_height = 0.0;
++
++	setup = gtk_print_context_get_page_setup (ctxt->context);
++	page_height = gtk_page_setup_get_page_height (setup, GTK_UNIT_POINTS);
++
++	cntct_height += get_font_height (ctxt->style->headings_font) * .2;
++
++	file_as = e_contact_get (contact, E_CONTACT_FILE_AS);
++
++	cntct_height += e_contact_text_height (
++		ctxt->context, ctxt->style->headings_font, file_as);
++
++	g_free (file_as);
++
++	cntct_height += get_font_height (ctxt->style->headings_font) * .2;
++
++	for (field = E_CONTACT_FILE_AS; field != E_CONTACT_LAST_SIMPLE_STRING; field++)
++	{
++		const gchar *value;
++		gchar *text;
++
++		value = e_contact_get_const (contact, field);
++		if (value == NULL || *value == '\0')
++			continue;
++
++		text = g_strdup_printf ("%s:  %s",
++			e_contact_pretty_name (field), value);
++
++		cntct_height += e_contact_text_height (
++			ctxt->context, ctxt->style->body_font, text);
++
++		cntct_height += .2 * get_font_height (ctxt->style->body_font);
++
++		g_free (text);
++	}
++
++	cntct_height += get_font_height (ctxt->style->headings_font) * .4 + 8;
++
++	return cntct_height;
++}
++
++
++static void
+ e_contact_print_contact (EContact *contact, EContactPrintContext *ctxt)
+ {
++	GtkPageSetup *setup;
+ 	gchar *file_as;
+ 	cairo_t *cr;
++	gdouble page_height;
+ 	gint field;
+ 
++	setup = gtk_print_context_get_page_setup (ctxt->context);
++	page_height = gtk_page_setup_get_page_height (setup, GTK_UNIT_POINTS);
++
+ 	cr = gtk_print_context_get_cairo_context (ctxt->context);
+ 	cairo_save(cr);
+ 	ctxt->y += get_font_height (ctxt->style->headings_font) * .2;
+@@ -260,6 +327,10 @@ e_contact_print_contact (EContact *conta
+ 	{
+ 		const gchar *value;
+ 		gchar *text;
++		gint wrapped_lines=0;
++
++		if (ctxt->y > page_height)
++			e_contact_start_new_column (ctxt);
+ 
+ 		value = e_contact_get_const (contact, field);
+ 		if (value == NULL || *value == '\0')
+@@ -271,10 +342,12 @@ e_contact_print_contact (EContact *conta
+ 		if (ctxt->pages == ctxt->page_nr)
+ 			e_contact_output (
+ 				ctxt->context, ctxt->style->body_font,
+-				ctxt->x, ctxt->y, -1, text);
++				ctxt->x, ctxt->y, ctxt->column_width + 4, text);
+ 
+-		ctxt->y += e_contact_text_height (
+-			ctxt->context, ctxt->style->body_font, text);
++		if ( get_font_width (ctxt->context, ctxt->style->body_font, text) > ctxt->column_width)
++			wrapped_lines =  ( get_font_width (ctxt->context, ctxt->style->body_font, text) / (ctxt->column_width+4)) + 1;
++		ctxt->y = ctxt->y + ((wrapped_lines+1) *e_contact_text_height (
++			ctxt->context, ctxt->style->body_font, text));
+ 
+ 		ctxt->y += .2 * get_font_height (ctxt->style->body_font);
+ 
+@@ -286,17 +359,7 @@ e_contact_print_contact (EContact *conta
+ 	cairo_restore (cr);
+ }
+ 
+-static void
+-e_contact_start_new_column (EContactPrintContext *ctxt)
+-{
+-	if (++ctxt->column >= ctxt->style->num_columns)
+-		e_contact_start_new_page (ctxt);
+-	else {
+-		ctxt->x = ctxt->column *
+-			(ctxt->column_width + ctxt->column_spacing);
+-		ctxt->y = .0;
+-	}
+-}
++
+ 
+ static gint
+ contact_compare (EContact *contact1, EContact *contact2)
+@@ -584,7 +647,7 @@ contact_draw (EContact *contact, EContac
+ 		if (!ctxt->first_contact) {
+ 			if (ctxt->style->sections_start_new_page)
+ 				e_contact_start_new_page (ctxt);
+-			else if (ctxt->y > page_height)
++			else if ((ctxt->y + e_contact_get_contact_height (contact, ctxt)) > page_height)
+ 				e_contact_start_new_column (ctxt);
+ 		}
+ 		if (ctxt->style->letter_headings)
+@@ -592,7 +655,7 @@ contact_draw (EContact *contact, EContac
+ 		ctxt->first_section = FALSE;
+ 	}
+ 
+-	else if (!ctxt->first_contact && (ctxt->y > page_height)) {
++	else if (!ctxt->first_contact && (( ctxt->y + e_contact_get_contact_height (contact, ctxt)) > page_height)) {
+ 		e_contact_start_new_column (ctxt);
+ 		if (ctxt->style->letter_headings)
+ 			e_contact_print_letter_heading (ctxt, ctxt->section);
+@@ -653,6 +716,55 @@ contact_begin_print (GtkPrintOperation *
+ 	}
+ }
+ 
++/* contact_page_draw_footer inserts the 
++ * page number at the end of each page 
++ * while printing*/
++void
++contact_page_draw_footer (GtkPrintOperation *operation,
++			  GtkPrintContext *context,
++			  gint page_nr)
++{
++	PangoFontDescription *desc;
++	PangoLayout *layout;
++	gdouble x, y, page_height, page_width, page_margin;
++	gint n_pages;
++	gchar *text;
++	cairo_t *cr;
++	GtkPageSetup *setup;
++	
++	/*Uncomment next if it is successful to get total number if pages in list view
++	 * g_object_get (operation, "n-pages", &n_pages, NULL)*/
++	text = g_strdup_printf (_("Page %d"), page_nr + 1);
++
++	setup = gtk_print_context_get_page_setup ( context);
++	page_height = gtk_page_setup_get_page_height (setup, GTK_UNIT_POINTS);
++	page_width = gtk_page_setup_get_page_width (setup, GTK_UNIT_POINTS);
++	page_margin = gtk_page_setup_get_bottom_margin (setup, GTK_UNIT_POINTS);
++
++	desc = pango_font_description_from_string ("Sans Regular 8");
++	layout = gtk_print_context_create_pango_layout (context);
++	pango_layout_set_alignment (layout, PANGO_ALIGN_CENTER);
++	pango_layout_set_font_description (layout, desc);
++	pango_layout_set_text (layout, text, -1);
++	pango_layout_set_width (layout, -1);
++
++	x = page_width/2.0 - page_margin;
++	y = page_height - page_margin/2.0;
++
++	cr = gtk_print_context_get_cairo_context (context);
++
++	cairo_save (cr);
++	cairo_set_source_rgb (cr, .0, .0, .0);
++	cairo_move_to (cr, x, y);
++	pango_cairo_show_layout (cr, layout);
++	cairo_restore (cr);
++
++	g_object_unref (layout);
++	pango_font_description_free (desc);
++
++	g_free (text);
++}
++
+ static void
+ contact_draw_page (GtkPrintOperation *operation,
+                    GtkPrintContext *context,
+@@ -670,6 +782,7 @@ contact_draw_page (GtkPrintOperation *op
+ 	ctxt->section = NULL;
+ 
+ 	g_list_foreach (ctxt->contact_list, (GFunc) contact_draw, ctxt);
++	contact_page_draw_footer (operation, context, page_nr);
+ }
+ 
+ static void
+diff -up evolution-2.28.3/addressbook/printing/e-contact-print.h.printing-improvements evolution-2.28.3/addressbook/printing/e-contact-print.h
+--- evolution-2.28.3/addressbook/printing/e-contact-print.h.printing-improvements	2009-07-13 03:45:12.000000000 -0400
++++ evolution-2.28.3/addressbook/printing/e-contact-print.h	2010-06-24 22:15:28.079023586 -0400
+@@ -31,5 +31,8 @@ void            e_contact_print         
+ 					       EBookQuery *query,
+ 					       GList *contact_list,
+ 					       GtkPrintOperationAction action);
++void 		contact_page_draw_footer      (GtkPrintOperation *operation, 
++						GtkPrintContext *context, 
++						gint page_nr);
+ 
+ #endif /* E_CONTACT_PRINT_H */
+diff -up evolution-2.28.3/calendar/gui/print.c.printing-improvements evolution-2.28.3/calendar/gui/print.c
+--- evolution-2.28.3/calendar/gui/print.c.printing-improvements	2009-12-14 01:04:31.000000000 -0500
++++ evolution-2.28.3/calendar/gui/print.c	2010-06-24 22:30:13.540791813 -0400
+@@ -135,7 +135,7 @@ get_font_size (PangoFontDescription *fon
+ #define DAY_VIEW_MIN_ROWS_IN_TOP_DISPLAY	2
+ 
+ /* The row height for long events in the day view. */
+-#define DAY_VIEW_ROW_HEIGHT		20
++#define DAY_VIEW_ROW_HEIGHT		14
+ 
+ /* The minutes per row in the day view printout. */
+ #define DAY_VIEW_MINS_PER_ROW		30
+@@ -1103,8 +1103,8 @@ print_day_long_event (GtkPrintContext *c
+ 
+ 	x1 = left + 10;
+ 	x2 = right - 10;
+-	y1 = top + event->start_row_or_col * row_height + 4;
+-	y2 = y1 + row_height-7;
++	y1 = top + event->start_row_or_col * row_height + 1;
++	y2 = y1 + row_height - 1;
+ 	red = green = blue = 0.95;
+ 	e_cal_model_get_rgb_color_for_component (model, event->comp_data, &red, &green, &blue);
+ 	print_border_with_triangles (context, x1, x2, y1, y2, 0.5, red, green, blue,
+@@ -1248,6 +1248,8 @@ print_day_details (GtkPrintContext *cont
+ 	double font_size, max_font_size;
+ 	cairo_t *cr;
+ 	GdkPixbuf *pixbuf = NULL;
++#define LONG_DAY_EVENTS_TOP_SPACING 4
++#define LONG_DAY_EVENTS_BOTTOM_SPACING 2
+ 
+ 	ECalModel *model = gnome_calendar_get_calendar_model (gcal);
+ 
+@@ -1318,7 +1320,7 @@ print_day_details (GtkPrintContext *cont
+ 
+ 	for (i = 0; i < rows_in_top_display && i < pdi.long_events->len; i++) {
+ 		event = &g_array_index (pdi.long_events, EDayViewEvent, i);
+-		print_day_long_event (context, font, left, right, top, bottom,
++		print_day_long_event (context, font, left, right, top + LONG_DAY_EVENTS_TOP_SPACING, bottom,
+ 				      DAY_VIEW_ROW_HEIGHT, event, &pdi, model);
+ 	}
+ 
+@@ -1327,8 +1329,6 @@ print_day_details (GtkPrintContext *cont
+ 		cairo_t *cr = gtk_print_context_get_cairo_context (context);
+ 		gint x, y;
+ 
+-		rows_in_top_display++;
+-
+ 		if (!pixbuf) {
+ 			const gchar **xpm = (const gchar **)jump_xpm;
+ 
+@@ -1342,9 +1342,12 @@ print_day_details (GtkPrintContext *cont
+ 
+ 		/* Right align - 10 comes from print_day_long_event  too */
+ 		x = right - gdk_pixbuf_get_width (pixbuf) * 0.5 - 10;
+-		/* Placing '...' at mid height. 4 and 7 constant come from print_day_long_event 
+-		   (offsets used to place events boxes in their respective cells) */
+-		y = top + DAY_VIEW_ROW_HEIGHT * i + (DAY_VIEW_ROW_HEIGHT - 4 - 7) * 0.5;
++		/* Placing '...' over the last all day event entry printed.
++		 * '-1 -1' comes from print_long_day_event (top / bottom
++		 * spacing in each cell). */
++		y = top + LONG_DAY_EVENTS_TOP_SPACING +
++			DAY_VIEW_ROW_HEIGHT * (i - 1) +
++			(DAY_VIEW_ROW_HEIGHT - 1 - 1) * 0.5;
+ 
+ 		cairo_save (cr);
+ 		cairo_scale (cr, 0.5, 0.5);
+@@ -1361,11 +1364,12 @@ print_day_details (GtkPrintContext *cont
+ 
+ 	cairo_set_source_rgb (cr, 0, 0, 0);
+ 		print_border (context, left, right,
+-		      top, top + rows_in_top_display * DAY_VIEW_ROW_HEIGHT - 4,
++		      top, 
++		      top + rows_in_top_display * DAY_VIEW_ROW_HEIGHT + LONG_DAY_EVENTS_TOP_SPACING + LONG_DAY_EVENTS_BOTTOM_SPACING,
+ 		      1.0, -1.0);
+ 
+ 	/* Adjust the area containing the main display. */
+-	top += rows_in_top_display * DAY_VIEW_ROW_HEIGHT - 2;
++	top += rows_in_top_display * DAY_VIEW_ROW_HEIGHT + LONG_DAY_EVENTS_TOP_SPACING + LONG_DAY_EVENTS_BOTTOM_SPACING;
+ 
+ 	/* Draw the borders, lines, and times down the left. */
+ 	print_day_background (context, gcal, whence, &pdi,
+@@ -1616,7 +1620,10 @@ print_week_event (GtkPrintContext *conte
+ 
+ 				if (end_day_of_week == 5 || end_day_of_week == 6) {
+ 					/* Sat or Sun */
+-					y1 = y1 + (psi->rows_per_compressed_cell - psi->rows_per_cell) * psi->row_height - 3.0;
++					y1 = top + start_y * cell_height +
++						psi->header_row_height +
++						psi->rows_per_compressed_cell *
++						(psi->row_height + 2);
+ 				}
+ 			}
+ 
+@@ -1839,7 +1846,7 @@ print_week_summary (GtkPrintContext *con
+ 	psi.rows_per_cell = ((cell_height * 2) - psi.header_row_height)
+ 		/ (psi.row_height + 2);
+ 	psi.rows_per_compressed_cell = (cell_height - psi.header_row_height)
+-		/ psi.row_height;
++		/ (psi.row_height + 2);
+ 
+ 	font = get_font_for_size (font_size, PANGO_WEIGHT_NORMAL);
+ 	/* Draw the grid and the day names/numbers. */
+diff -up evolution-2.28.3/widgets/table/e-cell-text.c.printing-improvements evolution-2.28.3/widgets/table/e-cell-text.c
+--- evolution-2.28.3/widgets/table/e-cell-text.c.printing-improvements	2009-12-14 01:04:31.000000000 -0500
++++ evolution-2.28.3/widgets/table/e-cell-text.c	2010-06-24 22:21:33.434803953 -0400
+@@ -609,7 +609,7 @@ build_layout (ECellTextView *text_view, 
+ 	}
+ 
+ 	pango_layout_set_width (layout, width * PANGO_SCALE);
+-	pango_layout_set_wrap (layout, PANGO_WRAP_CHAR);
++	pango_layout_set_wrap (layout, PANGO_WRAP_WORD_CHAR);
+ 
+ 	pango_layout_set_ellipsize (layout, PANGO_ELLIPSIZE_END);
+ 	pango_layout_set_height (layout, 0);
+@@ -1353,7 +1353,7 @@ ect_print (ECellView *ecell_view, GtkPri
+ 
+ 	cairo_save (cr);
+ 	layout = gtk_print_context_create_pango_layout (context);
+-	font_des = pango_font_description_from_string ("sans 12"); /* fix me font hardcoded */
++	font_des = pango_font_description_from_string ("sans 10"); /* fix me font hardcoded */
+ 	pango_layout_set_font_description (layout, font_des);
+ 
+ 	pango_layout_set_text (layout, string, -1);
+@@ -1410,6 +1410,7 @@ ect_print (ECellView *ecell_view, GtkPri
+ 
+ 	cairo_move_to(cr, 2, text_height- 5);
+ 	pango_layout_set_width (layout, (width - 4)*PANGO_SCALE);
++	pango_layout_set_wrap (layout, PANGO_WRAP_CHAR);
+ 	pango_cairo_show_layout(cr, layout);
+ 	cairo_restore (cr);
+ 
+@@ -1430,7 +1431,31 @@ ect_print_height (ECellView *ecell_view,
+ 	 * Height of some special font is much higher than others,
+ 	 * such	as Arabic. So leave some more margin for cell.
+ `	 */
+-	return 16 + 8;
++
++	PangoFontDescription *font_des;
++	PangoLayout *layout;
++	ECellText *ect = E_CELL_TEXT(ecell_view->ecell);
++	ECellTextView *ectView = (ECellTextView *)ecell_view;
++	gchar *string;
++	gdouble text_width = 0.0, text_height = 0.0;
++	gint lines=1;
++
++	string = e_cell_text_get_text (
++		ect, ecell_view->e_table_model, model_col, row);
++
++	layout = gtk_print_context_create_pango_layout (context);
++	font_des = pango_font_description_from_string ("sans 10");
++	pango_layout_set_font_description (layout, font_des);
++
++	pango_layout_set_text (layout, string, -1);
++	get_font_size (layout, font_des, string, &text_width, &text_height);
++
++	/* Checking if the text width goes beyond the column width
++	 * to increase the number of lines. */
++	if ( text_width > width - 4)
++		lines = (text_width / (width - 4)) + 1;
++
++	return 16 * lines + 8;
+ }
+ 
+ static gint
+diff -up evolution-2.28.3/widgets/table/e-table-group-container.c.printing-improvements evolution-2.28.3/widgets/table/e-table-group-container.c
+--- evolution-2.28.3/widgets/table/e-table-group-container.c.printing-improvements	2009-07-27 01:23:33.000000000 -0400
++++ evolution-2.28.3/widgets/table/e-table-group-container.c	2010-06-24 22:19:21.976794108 -0400
+@@ -1168,7 +1168,9 @@ e_table_group_container_print_page  (EPr
+ 				     ETGCPrintContext *groupcontext)
+ {
+ 	cairo_t *cr;
+-	gdouble yd = height;
++	GtkPageSetup *setup;
++	gdouble yd;
++	gdouble page_height, page_margin;
+ 	gdouble child_height;
+ 	ETableGroupContainerChildNode *child_node;
+ 	GList *child;
+@@ -1179,8 +1181,13 @@ e_table_group_container_print_page  (EPr
+ 
+ 	child_printable = groupcontext->child_printable;
+ 	child = groupcontext->child;
+-	yd = 6.5 * 72;
+-	height = 5 * 72;
++	setup = gtk_print_context_get_page_setup (context);
++	page_height =
++		gtk_page_setup_get_page_height (setup, GTK_UNIT_POINTS);
++	page_margin =
++		gtk_page_setup_get_top_margin (setup, GTK_UNIT_POINTS) +
++		gtk_page_setup_get_bottom_margin (setup, GTK_UNIT_POINTS);
++	yd = page_height - page_margin;
+ 
+ 	if (child_printable) {
+ 		if (child)
+@@ -1244,7 +1251,7 @@ e_table_group_container_print_page  (EPr
+ 		cairo_rectangle (cr, 0, 0, width - 2 * TEXT_AREA_HEIGHT,child_height);
+ 		cairo_clip(cr);
+ 
+-		e_printable_print_page (child_printable, context, width-2 * TEXT_AREA_HEIGHT, 0, quantize);
++		e_printable_print_page (child_printable, context, width-2 * TEXT_AREA_HEIGHT, height , quantize);
+ 		yd += child_height + TEXT_AREA_HEIGHT;
+ 
+ 		if (e_printable_data_left(child_printable))

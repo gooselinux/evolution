@@ -1,0 +1,27 @@
+diff -up evolution-2.28.3/mail/em-folder-browser.c.unlocalized-labels evolution-2.28.3/mail/em-folder-browser.c
+diff -up evolution-2.28.3/mail/em-mailer-prefs.c.unlocalized-labels evolution-2.28.3/mail/em-mailer-prefs.c
+--- evolution-2.28.3/mail/em-mailer-prefs.c.unlocalized-labels	2010-06-17 19:31:49.403478461 -0400
++++ evolution-2.28.3/mail/em-mailer-prefs.c	2010-06-17 19:33:01.599226665 -0400
+@@ -257,15 +257,21 @@ label_tree_refill (GConfClient *client, 
+ 		GdkColor color;
+ 		GtkTreeIter iter;
+ 		EUtilLabel *label = l->data;
++		const gchar *name;
+ 
+ 		if (label->colour)
+ 			gdk_color_parse (label->colour, &color);
+ 
++		if (e_util_labels_is_system (label->tag))
++			name = _(label->name);
++		else
++			name = label->name;
++
+ 		gtk_list_store_append (store, &iter);
+ 		gtk_list_store_set (
+ 			store, &iter,
+ 			LABEL_LIST_COLUMN_COLOR, label->colour ? &color : NULL,
+-			LABEL_LIST_COLUMN_NAME, label->name,
++			LABEL_LIST_COLUMN_NAME, name,
+ 			LABEL_LIST_COLUMN_TAG, label->tag,
+ 			-1);
+ 	}
